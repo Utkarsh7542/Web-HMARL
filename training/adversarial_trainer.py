@@ -72,9 +72,15 @@ class HierarchicalAdversarialTrainer:
         dataset_loader = SQLInjectionDataset(n_attacks=5000, n_benign=5000)
         self.dataset = dataset_loader.generate_dataset()
         self.dataset_loader = dataset_loader
+
+        # Precompute features once (major speedup vs per-step extraction in env/train)
+        print("Precomputing features...")
+        self.dataset['features'] = [
+            self.dataset_loader.extract_features(q) for q in self.dataset['query']
+        ]
         
         print("Creating environment...")
-        self.env = SQLInjectionEnv(dataset=self.dataset, max_steps=max_steps_per_episode)
+        self.env = SQLInjectionEnv(dataset=self.dataset, dataset_loader=dataset_loader, max_steps=max_steps_per_episode)
         
         # Agents
         print("Initializing hierarchical agents...")
@@ -97,7 +103,7 @@ class HierarchicalAdversarialTrainer:
     def _train_ml_baseline(self):
         """Train simple ML baseline on initial dataset"""
         print("Training ML baseline...")
-        X = np.array([self.dataset_loader.extract_features(q) for q in self.dataset['query']])
+        X = np.asarray(self.dataset['features'].tolist())
         y = self.dataset['label'].values
         
         from sklearn.model_selection import train_test_split
@@ -287,7 +293,7 @@ class HierarchicalAdversarialTrainer:
             query_idx = self.env.dataset_indices[idx % len(self.env.dataset)]
             query_data = self.dataset.iloc[query_idx]
             
-            obs = self.dataset_loader.extract_features(query_data['query'])
+            obs = np.asarray(query_data['features'], dtype=np.float32)
             observations.append(obs)
             
             # Label based on ground truth
@@ -458,7 +464,7 @@ class HierarchicalAdversarialTrainer:
         self.red_agent.save(f"{self.save_dir}/models/red_agent_{suffix}.pt")
         
         if final:
-            print(f"✅ Final checkpoint saved")
+            print("[OK] Final checkpoint saved")
         else:
             print(f"Checkpoint saved: episode {episode}")
     
@@ -482,7 +488,7 @@ class HierarchicalAdversarialTrainer:
         
         # Check if we have data
         if len(self.metrics['episode_rewards_red']) == 0:
-            print("⚠️  No metrics to plot yet")
+            print("[WARN] No metrics to plot yet")
             return
         
         if self.use_hierarchy:

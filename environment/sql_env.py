@@ -220,7 +220,10 @@ class SQLInjectionEnv(gym.Env):
         query_data = self.dataset.iloc[query_idx]
         
         # Blue observes query features (127-dim from Tier 1)
-        if self.dataset_loader is not None:
+        # Prefer precomputed features if present (much faster than per-step extraction)
+        if 'features' in query_data and query_data['features'] is not None:
+            blue_obs = np.asarray(query_data['features'], dtype=np.float32)
+        elif self.dataset_loader is not None:
             blue_obs = self.dataset_loader.extract_features(query_data['query'])
         else:
             # Fallback: create a temporary loader if not provided

@@ -185,11 +185,11 @@ class RedAgent:
             
             if os.path.exists(path):
                 file_size = os.path.getsize(path) / 1024  # KB
-                print(f"✅ Red agent saved to {path} ({file_size:.1f} KB)")
+                print(f"[OK] Red agent saved to {path} ({file_size:.1f} KB)")
             else:
-                print(f"⚠️  Warning: Model file may not have been created at {path}")
+                print(f"[WARN] Model file may not have been created at {path}")
         except Exception as e:
-            print(f"❌ Error saving Red agent: {e}")
+            print(f"[ERROR] Error saving Red agent: {e}")
     
     def load(self, path):
         """Load model checkpoint"""
@@ -247,4 +247,4 @@ if __name__ == "__main__":
     print(f"\nFinal epsilon: {agent.epsilon:.3f}")
     print(f"Target network updates: {agent.steps // agent.target_update_freq}")
     
-    print("\n✅ Red agent test complete!")
+    print("\n[OK] Red agent test complete!")

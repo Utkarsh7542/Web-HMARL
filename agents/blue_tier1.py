@@ -224,11 +224,11 @@ class Tier1Agent:
             
             if os.path.exists(path):
                 file_size = os.path.getsize(path) / 1024  # KB
-                print(f"✅ Tier 1 model saved to {path} ({file_size:.1f} KB)")
+                print(f"[OK] Tier 1 model saved to {path} ({file_size:.1f} KB)")
             else:
-                print(f"⚠️  Warning: Model file may not have been created at {path}")
+                print(f"[WARN] Model file may not have been created at {path}")
         except Exception as e:
-            print(f"❌ Error saving Tier 1 model: {e}")
+            print(f"[ERROR] Error saving Tier 1 model: {e}")
     
     def load(self, path):
         """Load model checkpoint"""
@@ -264,4 +264,4 @@ if __name__ == "__main__":
     action_thresh, score = agent.select_action_with_thresholds(test_obs[0])
     print(f"Threshold-based action: {action_thresh}, Threat score: {score:.3f}")
     
-    print("\n✅ Tier 1 test complete!")
+    print("\n[OK] Tier 1 test complete!")
