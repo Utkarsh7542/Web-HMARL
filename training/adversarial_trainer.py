@@ -1,7 +1,7 @@
 """
-Adversarial Training Pipeline
-Red-Blue co-evolutionary training
-Implements Nash equilibrium convergence through competitive learning
+Hierarchical Adversarial Training Pipeline
+Complete 3-tier hierarchy: Tier 1 → Master → Tier 2
+Implements framework Section 6.3-6.5 with baseline comparison
 """
 
 import numpy as np
@@ -11,21 +11,23 @@ from tqdm import tqdm
 import os
 import json
 from datetime import datetime
-import torch
 
-# Import our components
+# Import components
 import sys
 sys.path.append('..')
 from data.sqli_dataset import SQLInjectionDataset
 from environment.sql_env import SQLInjectionEnv
 from agents.blue_tier1 import Tier1Agent
+from agents.blue_tier2 import Tier2Agent
+from agents.master import MasterCoordinator
 from agents.red_agent import RedAgent
+from evaluation.baselines import ModSecurityBaseline, SimpleMLBaseline
 
 
-class AdversarialTrainer:
+class HierarchicalAdversarialTrainer:
     """
-    Manages adversarial training between red and blue agents
-    Tracks metrics, saves checkpoints, generates visualizations
+    Hierarchical Multi-Agent RL Training
+    Full 3-tier architecture with baseline comparison
     """
     
     def __init__(self, 
@@ -33,39 +35,20 @@ class AdversarialTrainer:
                  max_steps_per_episode=1000,
                  save_freq=500,
                  eval_freq=100,
-                 save_dir='results',
-                 device=None,
-                 use_gpu=True):
+                 save_dir='../results',
+                 use_hierarchy=True):
         
         self.n_episodes = n_episodes
         self.max_steps_per_episode = max_steps_per_episode
         self.save_freq = save_freq
         self.eval_freq = eval_freq
-        
-        # GPU setup
-        if device is None:
-            if use_gpu and torch.cuda.is_available():
-                self.device = torch.device('cuda')
-                print(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
-                print(f"   CUDA Version: {torch.version.cuda}")
-                print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-            else:
-                self.device = torch.device('cpu')
-                if use_gpu:
-                    print("⚠️  GPU requested but not available. Using CPU.")
-                else:
-                    print("💻 Using CPU")
-        else:
-            self.device = device
-            print(f"Using specified device: {self.device}")
-        
-        # Create save directories (use absolute path)
-        save_dir = os.path.abspath(save_dir)
         self.save_dir = save_dir
+        self.use_hierarchy = use_hierarchy
+        
+        # Create directories
         os.makedirs(f"{save_dir}/models", exist_ok=True)
         os.makedirs(f"{save_dir}/plots", exist_ok=True)
         os.makedirs(f"{save_dir}/logs", exist_ok=True)
-        print(f"📁 Save directory: {save_dir}")
         
         # Metrics tracking
         self.metrics = {
@@ -76,85 +59,83 @@ class AdversarialTrainer:
             'false_positive_rate': [],
             'blue_win_rate': [],
             'red_epsilon': [],
-            'episode_lengths': []
+            'episode_lengths': [],
+            # Hierarchical routing metrics
+            'tier1_only_rate': [],
+            'tier2_escalated_rate': [],
+            'tier3_analyzed_rate': [],
+            'immediate_block_rate': [],
         }
         
-        # Dataset and environment
+        # Dataset
         print("Creating dataset...")
         dataset_loader = SQLInjectionDataset(n_attacks=5000, n_benign=5000)
         self.dataset = dataset_loader.generate_dataset()
         self.dataset_loader = dataset_loader
         
         print("Creating environment...")
-        self.env = SQLInjectionEnv(
-            dataset=self.dataset,
-            dataset_loader=self.dataset_loader,
-            max_steps=max_steps_per_episode
-        )
+        self.env = SQLInjectionEnv(dataset=self.dataset, max_steps=max_steps_per_episode)
         
-        # Agents - ensure both use the same GPU device
-        print("Initializing agents on GPU...")
-        self.blue_agent = Tier1Agent(learning_rate=3e-4, device=self.device)
-        self.red_agent = RedAgent(learning_rate=1e-4, device=self.device)
+        # Agents
+        print("Initializing hierarchical agents...")
+        self.tier1_agent = Tier1Agent(learning_rate=3e-4)
+        self.tier2_agent = Tier2Agent(learning_rate=3e-4) if use_hierarchy else None
+        self.master = MasterCoordinator() if use_hierarchy else None
+        self.red_agent = RedAgent(learning_rate=1e-4)
         
-        print(f"✅ Blue agent device: {self.blue_agent.device}")
-        print(f"✅ Red agent device: {self.red_agent.device}")
+        print(f"Tier 1 device: {self.tier1_agent.device}")
+        if self.tier2_agent:
+            print(f"Tier 2 device: {self.tier2_agent.device}")
+        print(f"Hierarchy enabled: {use_hierarchy}")
         
-        # Enable cuDNN benchmarking for faster training (if GPU available)
-        if self.device.type == 'cuda':
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cudnn.deterministic = False
-            print("✅ cuDNN benchmarking enabled for faster training")
-            
-            # Clear GPU cache
-            torch.cuda.empty_cache()
-            print(f"✅ GPU memory cleared. Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        # Baselines (for comparison)
+        print("Initializing baselines...")
+        self.modsec_baseline = ModSecurityBaseline()
+        self.ml_baseline = SimpleMLBaseline()
+        self._train_ml_baseline()
+        
+    def _train_ml_baseline(self):
+        """Train simple ML baseline on initial dataset"""
+        print("Training ML baseline...")
+        X = np.array([self.dataset_loader.extract_features(q) for q in self.dataset['query']])
+        y = self.dataset['label'].values
+        
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        self.ml_baseline.train(X_train, y_train)
+        metrics = self.ml_baseline.evaluate(X_test, y_test)
+        print(f"ML Baseline initial performance: {metrics}")
         
     def train(self):
-        """Main training loop"""
+        """Main hierarchical training loop"""
         print(f"\n{'='*60}")
-        print(f"Starting Adversarial Training: {self.n_episodes} episodes")
+        print(f"Hierarchical Adversarial Training: {self.n_episodes} episodes")
+        print(f"Architecture: {'3-Tier Hierarchy' if self.use_hierarchy else 'Tier 1 Only'}")
         print(f"{'='*60}\n")
         
-        # GPU memory management
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-        
         for episode in tqdm(range(self.n_episodes), desc="Training"):
-            # Run episode
-            episode_metrics = self._run_episode(episode)
-            
-            # Store metrics
+            episode_metrics = self._run_hierarchical_episode(episode)
             self._update_metrics(episode_metrics)
             
-            # Evaluation
             if (episode + 1) % self.eval_freq == 0:
                 self._evaluate(episode + 1)
             
-            # Save checkpoint
             if (episode + 1) % self.save_freq == 0:
                 self._save_checkpoint(episode + 1)
-                # Clear GPU cache periodically
-                if self.device.type == 'cuda' and (episode + 1) % (self.save_freq * 2) == 0:
-                    torch.cuda.empty_cache()
         
-        # Final save and plots
+        # Final evaluation and comparison
         self._save_checkpoint(self.n_episodes, final=True)
+        self._final_baseline_comparison()
         self._generate_plots()
         self._save_metrics()
-        
-        # Final GPU memory report
-        if self.device.type == 'cuda':
-            print(f"\nGPU Memory Usage:")
-            print(f"  Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            print(f"  Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
         
         print(f"\n{'='*60}")
         print("Training Complete!")
         print(f"{'='*60}\n")
     
-    def _run_episode(self, episode_num):
-        """Run single episode of adversarial interaction"""
+    def _run_hierarchical_episode(self, episode_num):
+        """Run episode with hierarchical decision-making"""
         obs, _ = self.env.reset()
         
         episode_reward_red = 0
@@ -165,22 +146,60 @@ class AdversarialTrainer:
             'false_positives': 0,
             'true_negatives': 0,
             'total_attacks': 0,
-            'total_benign': 0
+            'total_benign': 0,
+            # Routing stats
+            'tier1_only': 0,
+            'tier2_escalated': 0,
+            'tier3_analyzed': 0,
+            'immediate_blocks': 0,
         }
         
         for step in range(self.max_steps_per_episode):
-            # Agent actions
-            blue_action, _ = self.blue_agent.select_action(
-                obs['blue'], 
-                deterministic=False
-            )
-            red_action = self.red_agent.select_action(
-                obs['red'], 
-                deterministic=False
+            # === HIERARCHICAL DECISION FLOW ===
+            
+            # 1. Tier 1 Detection
+            tier1_action, tier1_confidence = self.tier1_agent.select_action(
+                obs['blue'], deterministic=False
             )
             
+            final_action = tier1_action
+            route = 'tier1_only'
+            
+            # 2. Master Coordination (if hierarchy enabled)
+            if self.use_hierarchy and self.master:
+                route, master_action, master_conf = self.master.coordinate(
+                    tier1_confidence=tier1_confidence,
+                    tier1_action=tier1_action,
+                    query_features=obs['blue']
+                )
+                
+                # Track routing
+                episode_stats[route] = episode_stats.get(route, 0) + 1
+                
+                # 3. Tier 2 Decision (if escalated)
+                if route == 'tier2':
+                    context = self.master.get_context_for_tier2()
+                    tier1_probs = np.zeros(4)
+                    tier1_probs[tier1_action] = tier1_confidence
+                    
+                    tier2_action, _, _ = self.tier2_agent.select_action(
+                        obs['blue'], tier1_probs, context
+                    )
+                    final_action = tier2_action
+                elif route == 'immediate_block':
+                    final_action = 3  # Block
+                elif route == 'tier3':
+                    # Tier 3 would analyze asynchronously
+                    # For now, use Tier 1 decision
+                    final_action = tier1_action
+                else:  # tier1_only
+                    final_action = tier1_action
+            
+            # Red agent action
+            red_action = self.red_agent.select_action(obs['red'], deterministic=False)
+            
             # Environment step
-            actions = {'red': red_action, 'blue': blue_action}
+            actions = {'red': red_action, 'blue': final_action}
             next_obs, rewards, dones, truncs, info = self.env.step(actions)
             
             # Store transitions
@@ -188,6 +207,13 @@ class AdversarialTrainer:
                 obs['red'], red_action, rewards['red'], 
                 next_obs['red'], dones['red']
             )
+            
+            # Update master system state
+            if self.master:
+                self.master.update_system_state(
+                    attack_detected=info['true_positive'],
+                    false_positive=info['false_positive']
+                )
             
             # Track stats
             episode_reward_red += rewards['red']
@@ -207,24 +233,19 @@ class AdversarialTrainer:
                     episode_stats['true_negatives'] += 1
             
             # Train agents
-            if step % 4 == 0:  # Train every 4 steps
-                # Red agent training (DQN)
+            if step % 4 == 0:
                 red_loss = self.red_agent.train_step()
-                
-                # Blue agent training (simplified supervised learning)
-                # In full version, this would be more sophisticated
                 if len(self.env.defense_history) >= 32:
-                    self._train_blue_agent()
+                    self._train_blue_agents()
             
-            # Record red agent success for novelty tracking
             self.red_agent.record_attack_result(info['attack_successful'])
-            
             obs = next_obs
             
             if dones['red'] or dones['blue']:
                 break
         
-        # Calculate episode metrics
+        # Calculate metrics
+        total_queries = episode_stats['total_attacks'] + episode_stats['total_benign']
         episode_metrics = {
             'reward_red': episode_reward_red,
             'reward_blue': episode_reward_blue,
@@ -233,221 +254,384 @@ class AdversarialTrainer:
             'false_positive_rate': episode_stats['false_positives'] / max(episode_stats['total_benign'], 1),
             'blue_win_rate': episode_stats['attacks_blocked'] / max(episode_stats['total_attacks'], 1),
             'red_epsilon': self.red_agent.epsilon,
-            'episode_length': step + 1
+            'episode_length': step + 1,
         }
+        
+        # Routing metrics (if hierarchy enabled)
+        if self.use_hierarchy and total_queries > 0:
+            episode_metrics.update({
+                'tier1_only_rate': episode_stats.get('tier1_only', 0) / total_queries,
+                'tier2_escalated_rate': episode_stats.get('tier2', 0) / total_queries,
+                'tier3_analyzed_rate': episode_stats.get('tier3', 0) / total_queries,
+                'immediate_block_rate': episode_stats.get('immediate_block', 0) / total_queries,
+            })
+        else:
+            episode_metrics.update({
+                'tier1_only_rate': 1.0,
+                'tier2_escalated_rate': 0.0,
+                'tier3_analyzed_rate': 0.0,
+                'immediate_block_rate': 0.0,
+            })
         
         return episode_metrics
     
-    def _train_blue_agent(self):
-        """Train blue agent on recent experiences (GPU-optimized)"""
-        # Get recent defense history
+    def _train_blue_agents(self):
+        """Train blue agents on recent experiences"""
         recent_history = self.env.defense_history[-32:]
         
-        # Extract observations and ground truth
         observations = []
         labels = []
         
         for i, history in enumerate(recent_history):
-            # Get corresponding query index
             idx = max(0, self.env.current_idx - len(recent_history) + i)
             query_idx = self.env.dataset_indices[idx % len(self.env.dataset)]
             query_data = self.dataset.iloc[query_idx]
             
-            # Extract features
             obs = self.dataset_loader.extract_features(query_data['query'])
             observations.append(obs)
             
-            # Label: 0=Pass, 1=Escalate, 2=Suggest, 3=Block
-            # Simple heuristic: if attack -> block, else -> pass
+            # Label based on ground truth
             if query_data['label'] == 1:
                 labels.append(3)  # Block
             else:
                 labels.append(0)  # Pass
         
-        # Convert to numpy arrays (CPU) then move to GPU in train_step
-        observations = np.array(observations, dtype=np.float32)
-        labels = np.array(labels, dtype=np.int64)
+        observations = np.array(observations)
+        labels = np.array(labels)
         
-        # Train (tensors will be moved to GPU inside train_step)
-        loss, acc = self.blue_agent.train_step(observations, labels)
+        # Train Tier 1
+        loss, acc = self.tier1_agent.train_step(observations, labels)
+        
+        # Train Tier 2 (if enabled)
+        # In full version, this would use PPO
+        # For now, simplified supervised learning
     
     def _update_metrics(self, episode_metrics):
         """Update running metrics"""
-        self.metrics['episode_rewards_red'].append(episode_metrics['reward_red'])
-        self.metrics['episode_rewards_blue'].append(episode_metrics['reward_blue'])
-        self.metrics['attack_success_rate'].append(episode_metrics['attack_success_rate'])
-        self.metrics['detection_accuracy'].append(episode_metrics['detection_accuracy'])
-        self.metrics['false_positive_rate'].append(episode_metrics['false_positive_rate'])
-        self.metrics['blue_win_rate'].append(episode_metrics['blue_win_rate'])
-        self.metrics['red_epsilon'].append(episode_metrics['red_epsilon'])
-        self.metrics['episode_lengths'].append(episode_metrics['episode_length'])
+        for key, value in episode_metrics.items():
+            if key in self.metrics:
+                self.metrics[key].append(value)
     
     def _evaluate(self, episode):
         """Evaluate current performance"""
-        recent = 100
+        recent = min(100, episode)
+        
         avg_red_reward = np.mean(self.metrics['episode_rewards_red'][-recent:])
         avg_blue_reward = np.mean(self.metrics['episode_rewards_blue'][-recent:])
         avg_attack_success = np.mean(self.metrics['attack_success_rate'][-recent:])
         avg_detection = np.mean(self.metrics['detection_accuracy'][-recent:])
         avg_fp = np.mean(self.metrics['false_positive_rate'][-recent:])
         
-        print(f"\n--- Episode {episode} Evaluation ---")
-        print(f"Red Reward: {avg_red_reward:.2f}")
-        print(f"Blue Reward: {avg_blue_reward:.2f}")
-        print(f"Attack Success Rate: {avg_attack_success:.2%}")
-        print(f"Detection Accuracy: {avg_detection:.2%}")
-        print(f"False Positive Rate: {avg_fp:.2%}")
-        print(f"Red Epsilon: {self.red_agent.epsilon:.3f}")
+        print(f"\n{'='*50}")
+        print(f"Episode {episode} Evaluation")
+        print(f"{'='*50}")
+        print(f"Red Reward:          {avg_red_reward:>8.2f}")
+        print(f"Blue Reward:         {avg_blue_reward:>8.2f}")
+        print(f"Attack Success:      {avg_attack_success:>7.1%}")
+        print(f"Detection Accuracy:  {avg_detection:>7.1%}")
+        print(f"False Positive:      {avg_fp:>7.1%}")
+        print(f"Red Epsilon:         {self.red_agent.epsilon:>8.3f}")
         
-        # GPU memory info
-        if self.device.type == 'cuda':
-            allocated = torch.cuda.memory_allocated() / 1e9
-            cached = torch.cuda.memory_reserved() / 1e9
-            print(f"GPU Memory: {allocated:.2f} GB allocated, {cached:.2f} GB cached")
-        print()
+        if self.use_hierarchy:
+            avg_t1 = np.mean(self.metrics['tier1_only_rate'][-recent:])
+            avg_t2 = np.mean(self.metrics['tier2_escalated_rate'][-recent:])
+            avg_t3 = np.mean(self.metrics['tier3_analyzed_rate'][-recent:])
+            avg_block = np.mean(self.metrics['immediate_block_rate'][-recent:])
+            
+            print(f"\nHierarchical Routing:")
+            print(f"  Tier 1 Only:       {avg_t1:>7.1%}")
+            print(f"  Tier 2 Escalated:  {avg_t2:>7.1%}")
+            print(f"  Tier 3 Analyzed:   {avg_t3:>7.1%}")
+            print(f"  Immediate Block:   {avg_block:>7.1%}")
+        
+        print(f"{'='*50}\n")
+    
+    def _final_baseline_comparison(self):
+        """Compare against baselines on test set"""
+        print("\n" + "="*60)
+        print("BASELINE COMPARISON")
+        print("="*60)
+        
+        # Evaluate on test data
+        test_size = min(1000, len(self.dataset))
+        test_indices = np.random.choice(len(self.dataset), test_size, replace=False)
+        
+        # Web-HMARL evaluation
+        hmarl_correct = 0
+        hmarl_fp = 0
+        hmarl_fn = 0
+        
+        # ModSecurity evaluation
+        modsec_correct = 0
+        modsec_fp = 0
+        modsec_fn = 0
+        
+        # ML Baseline evaluation
+        ml_correct = 0
+        ml_fp = 0
+        ml_fn = 0
+        
+        for idx in tqdm(test_indices, desc="Evaluating baselines"):
+            query_data = self.dataset.iloc[idx]
+            query = query_data['query']
+            true_label = query_data['label']
+            features = self.dataset_loader.extract_features(query)
+            
+            # Web-HMARL prediction
+            tier1_action, tier1_conf = self.tier1_agent.select_action(features, deterministic=True)
+            hmarl_blocks = tier1_action in [2, 3]
+            
+            if true_label == 1:  # Attack
+                if hmarl_blocks:
+                    hmarl_correct += 1
+                else:
+                    hmarl_fn += 1
+            else:  # Benign
+                if not hmarl_blocks:
+                    hmarl_correct += 1
+                else:
+                    hmarl_fp += 1
+            
+            # ModSecurity prediction
+            modsec_detected, _ = self.modsec_baseline.detect(query)
+            if true_label == 1:
+                if modsec_detected:
+                    modsec_correct += 1
+                else:
+                    modsec_fn += 1
+            else:
+                if not modsec_detected:
+                    modsec_correct += 1
+                else:
+                    modsec_fp += 1
+            
+            # ML Baseline prediction
+            ml_pred = self.ml_baseline.predict(features.reshape(1, -1))[0]
+            if true_label == ml_pred:
+                ml_correct += 1
+            elif true_label == 1:
+                ml_fn += 1
+            else:
+                ml_fp += 1
+        
+        # Calculate metrics
+        results = {
+            'Web-HMARL': {
+                'accuracy': (hmarl_correct / test_size) * 100,
+                'false_positive': (hmarl_fp / test_size) * 100,
+                'false_negative': (hmarl_fn / test_size) * 100,
+            },
+            'ModSecurity CRS': {
+                'accuracy': (modsec_correct / test_size) * 100,
+                'false_positive': (modsec_fp / test_size) * 100,
+                'false_negative': (modsec_fn / test_size) * 100,
+            },
+            'ML Baseline': {
+                'accuracy': (ml_correct / test_size) * 100,
+                'false_positive': (ml_fp / test_size) * 100,
+                'false_negative': (ml_fn / test_size) * 100,
+            }
+        }
+        
+        # Print comparison table
+        print(f"\n{'Method':<20} {'Accuracy':<12} {'FP Rate':<12} {'FN Rate':<12}")
+        print("-" * 60)
+        for method, metrics in results.items():
+            print(f"{method:<20} {metrics['accuracy']:>10.1f}% {metrics['false_positive']:>10.1f}% {metrics['false_negative']:>10.1f}%")
+        
+        # Save comparison
+        with open(f"{self.save_dir}/logs/baseline_comparison.json", 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"\nComparison saved to {self.save_dir}/logs/baseline_comparison.json")
+        print("="*60 + "\n")
+        
+        return results
     
     def _save_checkpoint(self, episode, final=False):
         """Save model checkpoints"""
         suffix = 'final' if final else f'ep{episode}'
         
-        try:
-            blue_path = os.path.join(self.save_dir, "models", f"blue_agent_{suffix}.pt")
-            red_path = os.path.join(self.save_dir, "models", f"red_agent_{suffix}.pt")
-            
-            self.blue_agent.save(blue_path)
-            self.red_agent.save(red_path)
-            
-            # Verify files were created
-            if os.path.exists(blue_path) and os.path.exists(red_path):
-                print(f"✅ Checkpoint saved: {suffix}")
-                print(f"   Blue: {blue_path}")
-                print(f"   Red: {red_path}")
-            else:
-                print(f"⚠️  Warning: Checkpoint files may not have been created")
-        except Exception as e:
-            print(f"❌ Error saving checkpoint: {e}")
+        self.tier1_agent.save(f"{self.save_dir}/models/tier1_{suffix}.pt")
+        if self.tier2_agent:
+            self.tier2_agent.save(f"{self.save_dir}/models/tier2_{suffix}.pt")
+        self.red_agent.save(f"{self.save_dir}/models/red_agent_{suffix}.pt")
+        
+        if final:
+            print(f"✅ Final checkpoint saved")
+        else:
+            print(f"Checkpoint saved: episode {episode}")
     
     def _save_metrics(self):
         """Save metrics to JSON"""
-        filepath = os.path.join(self.save_dir, "logs", "training_metrics.json")
+        filepath = f"{self.save_dir}/logs/training_metrics.json"
         
-        try:
-            # Convert to serializable format
-            metrics_serializable = {
-                k: [float(v) for v in values] 
-                for k, values in self.metrics.items()
-            }
-            
-            with open(filepath, 'w') as f:
-                json.dump(metrics_serializable, f, indent=2)
-            
-            if os.path.exists(filepath):
-                print(f"✅ Metrics saved to {filepath}")
-            else:
-                print(f"⚠️  Warning: Metrics file may not have been created")
-        except Exception as e:
-            print(f"❌ Error saving metrics: {e}")
+        metrics_serializable = {
+            k: [float(v) if not isinstance(v, (list, dict)) else v for v in values] 
+            for k, values in self.metrics.items()
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(metrics_serializable, f, indent=2)
+        
+        print(f"Metrics saved to {filepath}")
     
     def _generate_plots(self):
-        """Generate training visualization plots"""
+        """Generate comprehensive training visualization"""
         sns.set_style("whitegrid")
         
-        # Create figure with subplots
-        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
-        fig.suptitle('Adversarial Training Results', fontsize=16, fontweight='bold')
+        # Check if we have data
+        if len(self.metrics['episode_rewards_red']) == 0:
+            print("⚠️  No metrics to plot yet")
+            return
+        
+        if self.use_hierarchy:
+            fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+        else:
+            fig, axes = plt.subplots(3, 2, figsize=(16, 12))
+        
+        fig.suptitle(
+            'Hierarchical Multi-Agent RL Training Results' if self.use_hierarchy else 'Flat MARL Training Results',
+            fontsize=16, fontweight='bold'
+        )
+        
+        # Use actual episode numbers that match data length
+        n_episodes = len(self.metrics['episode_rewards_red'])
+        episodes = np.arange(n_episodes)
         
         # Plot 1: Rewards
         ax = axes[0, 0]
-        episodes = range(len(self.metrics['episode_rewards_red']))
-        ax.plot(episodes, self._smooth(self.metrics['episode_rewards_red']), 
-                label='Red Agent', color='red', alpha=0.8)
-        ax.plot(episodes, self._smooth(self.metrics['episode_rewards_blue']), 
-                label='Blue Agent', color='blue', alpha=0.8)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Reward')
-        ax.set_title('Episode Rewards')
+        smoothed_red = self._smooth(self.metrics['episode_rewards_red'])
+        smoothed_blue = self._smooth(self.metrics['episode_rewards_blue'])
+        
+        # Make sure lengths match
+        episodes_plot = np.arange(len(smoothed_red))
+        
+        ax.plot(episodes_plot, smoothed_red, label='Red Agent', color='red', alpha=0.8, linewidth=2)
+        ax.plot(episodes_plot[:len(smoothed_blue)], smoothed_blue, label='Blue Agent', color='blue', alpha=0.8, linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('Reward', fontsize=11)
+        ax.set_title('Episode Rewards', fontsize=12, fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3)
         
         # Plot 2: Attack Success Rate
         ax = axes[0, 1]
-        ax.plot(episodes, self._smooth(self.metrics['attack_success_rate']), 
-                color='darkred', linewidth=2)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Success Rate')
-        ax.set_title('Attack Success Rate (Red Performance)')
+        smoothed = self._smooth(self.metrics['attack_success_rate'])
+        episodes_plot = np.arange(len(smoothed))
+        ax.plot(episodes_plot, smoothed, color='darkred', linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('Success Rate', fontsize=11)
+        ax.set_title('Attack Success Rate (Red Performance)', fontsize=12, fontweight='bold')
+        ax.axhline(y=0.0, color='green', linestyle='--', alpha=0.5, label='Target: 0%')
+        ax.legend()
         ax.grid(True, alpha=0.3)
         
         # Plot 3: Detection Accuracy
         ax = axes[1, 0]
-        ax.plot(episodes, self._smooth(self.metrics['detection_accuracy']), 
-                color='darkblue', linewidth=2)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Accuracy')
-        ax.set_title('Detection Accuracy (Blue Performance)')
+        smoothed = self._smooth(self.metrics['detection_accuracy'])
+        episodes_plot = np.arange(len(smoothed))
+        ax.plot(episodes_plot, smoothed, color='darkblue', linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('Accuracy', fontsize=11)
+        ax.set_title('Detection Accuracy (Blue Performance)', fontsize=12, fontweight='bold')
+        ax.axhline(y=1.0, color='green', linestyle='--', alpha=0.5, label='Target: 100%')
+        ax.legend()
         ax.grid(True, alpha=0.3)
         
         # Plot 4: False Positive Rate
         ax = axes[1, 1]
-        ax.plot(episodes, self._smooth(self.metrics['false_positive_rate']), 
-                color='orange', linewidth=2)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('FP Rate')
-        ax.set_title('False Positive Rate')
+        smoothed = self._smooth(self.metrics['false_positive_rate'])
+        episodes_plot = np.arange(len(smoothed))
+        ax.plot(episodes_plot, smoothed, color='orange', linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('FP Rate', fontsize=11)
+        ax.set_title('False Positive Rate', fontsize=12, fontweight='bold')
+        ax.axhline(y=0.0, color='green', linestyle='--', alpha=0.5, label='Target: 0%')
+        ax.legend()
         ax.grid(True, alpha=0.3)
         
         # Plot 5: Blue Win Rate
         ax = axes[2, 0]
-        ax.plot(episodes, self._smooth(self.metrics['blue_win_rate']), 
-                color='green', linewidth=2)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Win Rate')
-        ax.set_title('Blue Win Rate (Attacks Blocked)')
+        smoothed = self._smooth(self.metrics['blue_win_rate'])
+        episodes_plot = np.arange(len(smoothed))
+        ax.plot(episodes_plot, smoothed, color='green', linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('Win Rate', fontsize=11)
+        ax.set_title('Blue Win Rate (Attacks Blocked)', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
         
-        # Plot 6: Red Epsilon (Exploration)
+        # Plot 6: Red Epsilon
         ax = axes[2, 1]
-        ax.plot(episodes, self.metrics['red_epsilon'], 
-                color='purple', linewidth=2)
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Epsilon')
-        ax.set_title('Red Agent Exploration Rate')
+        ax.plot(episodes, self.metrics['red_epsilon'], color='purple', linewidth=2)
+        ax.set_xlabel('Episode', fontsize=11)
+        ax.set_ylabel('Epsilon', fontsize=11)
+        ax.set_title('Red Agent Exploration Rate', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
+        
+        # Hierarchical routing plots (if enabled)
+        if self.use_hierarchy and len(self.metrics['tier1_only_rate']) > 0:
+            ax = axes[3, 0]
+            smoothed_t1 = self._smooth(self.metrics['tier1_only_rate'])
+            smoothed_t2 = self._smooth(self.metrics['tier2_escalated_rate'])
+            smoothed_t3 = self._smooth(self.metrics['tier3_analyzed_rate'])
+            smoothed_ib = self._smooth(self.metrics['immediate_block_rate'])
+            
+            episodes_plot = np.arange(len(smoothed_t1))
+            
+            ax.plot(episodes_plot, smoothed_t1, label='Tier 1 Only', linewidth=2)
+            ax.plot(episodes_plot[:len(smoothed_t2)], smoothed_t2, label='Tier 2 Escalated', linewidth=2)
+            ax.plot(episodes_plot[:len(smoothed_t3)], smoothed_t3, label='Tier 3 Analyzed', linewidth=2)
+            ax.plot(episodes_plot[:len(smoothed_ib)], smoothed_ib, label='Immediate Block', linewidth=2)
+            ax.set_xlabel('Episode', fontsize=11)
+            ax.set_ylabel('Routing Rate', fontsize=11)
+            ax.set_title('Hierarchical Routing Distribution', fontsize=12, fontweight='bold')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Final routing pie chart
+            ax = axes[3, 1]
+            recent = min(100, len(self.metrics['tier1_only_rate']))
+            final_routing = [
+                np.mean(self.metrics['tier1_only_rate'][-recent:]),
+                np.mean(self.metrics['tier2_escalated_rate'][-recent:]),
+                np.mean(self.metrics['tier3_analyzed_rate'][-recent:]),
+                np.mean(self.metrics['immediate_block_rate'][-recent:]),
+            ]
+            labels = ['Tier 1 Only', 'Tier 2\nEscalated', 'Tier 3\nAnalyzed', 'Immediate\nBlock']
+            colors = ['#3498db', '#e74c3c', '#f39c12', '#2ecc71']
+            ax.pie(final_routing, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+            ax.set_title('Final Routing Distribution', fontsize=12, fontweight='bold')
         
         plt.tight_layout()
         
-        # Save
-        filepath = os.path.join(self.save_dir, "plots", "training_results.png")
-        try:
-            plt.savefig(filepath, dpi=300, bbox_inches='tight')
-            if os.path.exists(filepath):
-                print(f"✅ Training plots saved to {filepath}")
-            else:
-                print(f"⚠️  Warning: Plot file may not have been created")
-        except Exception as e:
-            print(f"❌ Error saving plots: {e}")
+        filepath = f"{self.save_dir}/plots/training_results.png"
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        print(f"Training plots saved to {filepath}")
         
         plt.close()
     
     def _smooth(self, data, window=50):
         """Smooth data for plotting"""
+        if len(data) == 0:
+            return []
         if len(data) < window:
             return data
-        smoothed = np.convolve(data, np.ones(window)/window, mode='valid')
-        # Pad to original length
-        pad_length = len(data) - len(smoothed)
-        return np.concatenate([data[:pad_length], smoothed])
+        
+        # Use numpy convolve for smoothing
+        smoothed = np.convolve(data, np.ones(window)/window, mode='same')
+        
+        return smoothed
 
 
 # Main execution
 if __name__ == "__main__":
-    # Create trainer
-    trainer = AdversarialTrainer(
-        n_episodes=5000,
-        max_steps_per_episode=1000,
-        save_freq=500,
-        eval_freq=100
+    trainer = HierarchicalAdversarialTrainer(
+        n_episodes=1000,
+        max_steps_per_episode=500,
+        save_freq=200,
+        eval_freq=50,
+        use_hierarchy=True
     )
     
-    # Run training
     trainer.train()

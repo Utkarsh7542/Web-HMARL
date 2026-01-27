@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import os
 
 class Tier1Detector(nn.Module):
     """
@@ -209,14 +210,25 @@ class Tier1Agent:
     
     def save(self, path):
         """Save model checkpoint"""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'thresholds': self.thresholds,
-            'train_losses': self.train_losses,
-            'train_accuracies': self.train_accuracies
-        }, path)
-        print(f"Tier 1 model saved to {path}")
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            torch.save({
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'thresholds': self.thresholds,
+                'train_losses': self.train_losses,
+                'train_accuracies': self.train_accuracies
+            }, path)
+            
+            if os.path.exists(path):
+                file_size = os.path.getsize(path) / 1024  # KB
+                print(f"✅ Tier 1 model saved to {path} ({file_size:.1f} KB)")
+            else:
+                print(f"⚠️  Warning: Model file may not have been created at {path}")
+        except Exception as e:
+            print(f"❌ Error saving Tier 1 model: {e}")
     
     def load(self, path):
         """Load model checkpoint"""

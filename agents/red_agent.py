@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 from collections import deque
 import random
+import os
 
 class DQNetwork(nn.Module):
     """
@@ -168,16 +169,27 @@ class RedAgent:
     
     def save(self, path):
         """Save model checkpoint"""
-        torch.save({
-            'q_network_state_dict': self.q_network.state_dict(),
-            'target_network_state_dict': self.target_network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'epsilon': self.epsilon,
-            'steps': self.steps,
-            'train_losses': self.train_losses,
-            'success_rates': self.success_rates
-        }, path)
-        print(f"Red agent saved to {path}")
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            torch.save({
+                'q_network_state_dict': self.q_network.state_dict(),
+                'target_network_state_dict': self.target_network.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'epsilon': self.epsilon,
+                'steps': self.steps,
+                'train_losses': self.train_losses,
+                'success_rates': self.success_rates
+            }, path)
+            
+            if os.path.exists(path):
+                file_size = os.path.getsize(path) / 1024  # KB
+                print(f"✅ Red agent saved to {path} ({file_size:.1f} KB)")
+            else:
+                print(f"⚠️  Warning: Model file may not have been created at {path}")
+        except Exception as e:
+            print(f"❌ Error saving Red agent: {e}")
     
     def load(self, path):
         """Load model checkpoint"""
