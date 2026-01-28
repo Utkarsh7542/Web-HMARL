@@ -170,7 +170,7 @@ class SQLInjectionEnv(gym.Env):
     
     def _calculate_red_reward(self, success, blocked, action):
         """
-        Red agent reward (Section 6.2)
+        Red agent reward (Section 6.2) - WITH NaN PROTECTION
         R_adversarial = +10 (bypass) +5 (novel) -2 (blocked) +1 (expensive analysis)
         """
         reward = 0.0
@@ -181,17 +181,22 @@ class SQLInjectionEnv(gym.Env):
         if blocked:
             reward -= 2.0  # Got detected
         
-        # Novelty bonus (placeholder - could track unique attack patterns)
+        # Novelty bonus with proper safeguards
         if len(self.attack_history) > 0:
             recent_actions = [h['action'] for h in self.attack_history[-10:]]
-            if recent_actions.count(action) <= 2:
+            if len(recent_actions) > 0 and recent_actions.count(action) <= 2:
                 reward += 1.0  # Exploring diverse attacks
         
-        return reward
-    
+        # NaN protection
+        if np.isnan(reward) or np.isinf(reward):
+            print(f"⚠️ WARNING: Invalid red reward: {reward}, resetting to 0.0")
+            reward = 0.0
+        
+        return float(reward)
+
     def _calculate_blue_reward(self, tp, fp, tn, action):
         """
-        Blue agent reward (Section 6.3 Tier 2)
+        Blue agent reward (Section 6.3 Tier 2) - WITH NaN PROTECTION
         R_response = 5×(blocks) - 3×(FP) - 2×(UX friction) + 1×(intel)
         """
         reward = 0.0
@@ -211,7 +216,12 @@ class SQLInjectionEnv(gym.Env):
         elif action == 3:  # Throttle
             reward -= 1.0  # Higher cost for rate limiting
         
-        return reward
+        # NaN protection
+        if np.isnan(reward) or np.isinf(reward):
+            print(f"⚠️ WARNING: Invalid blue reward: {reward}, resetting to 0.0")
+            reward = 0.0
+        
+        return float(reward)
     
     def _get_observations(self):
         """Get current observations for both agents"""

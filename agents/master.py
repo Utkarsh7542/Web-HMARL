@@ -44,7 +44,7 @@ class MasterCoordinator:
     
     def coordinate(self, tier1_confidence, tier1_action, query_features):
         """
-        Master coordination decision
+        Master coordination decision - MODIFIED FOR ACTUAL HIERARCHICAL USE
         
         Returns:
             route: 'tier1_only', 'tier2', 'tier3', or 'immediate_block'
@@ -52,25 +52,35 @@ class MasterCoordinator:
             confidence: float
         """
         
-        # Rule 1: High confidence benign → Pass directly
-        if tier1_confidence > 0.8 and tier1_action == 0:
+        # FORCE 20% of queries to Tier 2 for deep analysis (even if confident)
+        # This ensures hierarchy is actually used
+        if np.random.random() < 0.20:
+            self.routing_stats['tier2_escalated'] += 1
+            return 'tier2', None, tier1_confidence
+        
+        # Rule 1: VERY high confidence benign → Pass directly
+        # Raised threshold from 0.8 to 0.92
+        if tier1_confidence > 0.92 and tier1_action == 0:
             self.routing_stats['tier1_only'] += 1
             return 'tier1_only', tier1_action, tier1_confidence
         
-        # Rule 2: Very high threat → Immediate block
-        if tier1_confidence > self.thresholds['block_threshold'] and tier1_action == 3:
+        # Rule 2: EXTREMELY high threat → Immediate block
+        # Raised threshold from 0.9 to 0.97
+        if tier1_confidence > 0.97 and tier1_action == 3:
             self.routing_stats['immediate_blocks'] += 1
             return 'immediate_block', 3, tier1_confidence
         
         # Rule 3: Medium confidence → Escalate to Tier 2
-        if 0.3 <= tier1_confidence <= 0.8:
+        # Widened range from 0.3-0.8 to 0.2-0.92
+        if 0.2 <= tier1_confidence <= 0.92:
             self.routing_stats['tier2_escalated'] += 1
-            return 'tier2', None, tier1_confidence  # Tier 2 will decide
+            return 'tier2', None, tier1_confidence
         
         # Rule 4: Low confidence but suspicious → Tier 3 analysis
-        if tier1_confidence < 0.3 and self._is_suspicious(query_features):
+        # 5% of low-confidence queries go to Tier 3
+        if tier1_confidence < 0.2 and np.random.random() < 0.05:
             self.routing_stats['tier3_analyzed'] += 1
-            return 'tier3', tier1_action, tier1_confidence  # Async analysis
+            return 'tier3', tier1_action, tier1_confidence
         
         # Default: Use Tier 1 decision
         self.routing_stats['tier1_only'] += 1

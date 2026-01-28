@@ -69,7 +69,7 @@ class HierarchicalAdversarialTrainer:
         
         # Dataset
         print("Creating dataset...")
-        dataset_loader = SQLInjectionDataset(n_attacks=5000, n_benign=5000)
+        dataset_loader = SQLInjectionDataset(n_attacks=1000, n_benign=1000)
         self.dataset = dataset_loader.generate_dataset()
         self.dataset_loader = dataset_loader
 
@@ -201,13 +201,34 @@ class HierarchicalAdversarialTrainer:
                 else:  # tier1_only
                     final_action = tier1_action
             
-            # Red agent action
-            red_action = self.red_agent.select_action(obs['red'], deterministic=False)
+            # Red agent action - ADAPTIVE
+            blue_blocking_patterns = {
+                'recent_block_rate': sum(1 for d in self.env.defense_history[-20:] if d.get('blocked', False)) / max(len(self.env.defense_history[-20:]), 1) if len(self.env.defense_history) > 0 else 0.0
+            }
+            red_action = self.red_agent.select_action_adaptive(
+                obs['red'], 
+                blue_blocking_patterns, 
+                deterministic=False
+            )
+
+            # Adapt red's exploration based on blue's strength
+            if step % 100 == 0 and len(self.env.defense_history) >= 20:
+                recent_defenses = self.env.defense_history[-100:]
+                blue_strength = sum(1 for d in recent_defenses if d.get('correct', False)) / len(recent_defenses)
+                self.red_agent.adapt_to_blue_defense(blue_strength)
             
             # Environment step
             actions = {'red': red_action, 'blue': final_action}
             next_obs, rewards, dones, truncs, info = self.env.step(actions)
             
+            if np.isnan(rewards['red']) or np.isinf(rewards['red']):
+                print(f"⚠️ Episode {episode_num}, Step {step}: Invalid red reward, setting to 0.0")
+                rewards['red'] = 0.0
+
+            if np.isnan(rewards['blue']) or np.isinf(rewards['blue']):
+                print(f"⚠️ Episode {episode_num}, Step {step}: Invalid blue reward, setting to 0.0")
+                rewards['blue'] = 0.0
+
             # Store transitions
             self.red_agent.store_transition(
                 obs['red'], red_action, rewards['red'], 
@@ -239,7 +260,7 @@ class HierarchicalAdversarialTrainer:
                     episode_stats['true_negatives'] += 1
             
             # Train agents
-            if step % 4 == 0:
+            if step % 32 == 0:
                 red_loss = self.red_agent.train_step()
                 if len(self.env.defense_history) >= 32:
                     self._train_blue_agents()
@@ -282,36 +303,28 @@ class HierarchicalAdversarialTrainer:
         return episode_metrics
     
     def _train_blue_agents(self):
-        """Train blue agents on recent experiences"""
+        """Optimized batched training"""
+        if len(self.env.defense_history) < 32:
+            return
+        
         recent_history = self.env.defense_history[-32:]
         
-        observations = []
-        labels = []
+        # Preallocate arrays (much faster)
+        observations = np.zeros((len(recent_history), 127), dtype=np.float32)
+        labels = np.zeros(len(recent_history), dtype=np.int64)
         
         for i, history in enumerate(recent_history):
             idx = max(0, self.env.current_idx - len(recent_history) + i)
             query_idx = self.env.dataset_indices[idx % len(self.env.dataset)]
             query_data = self.dataset.iloc[query_idx]
             
-            obs = np.asarray(query_data['features'], dtype=np.float32)
-            observations.append(obs)
-            
-            # Label based on ground truth
-            if query_data['label'] == 1:
-                labels.append(3)  # Block
-            else:
-                labels.append(0)  # Pass
+            # Use precomputed features (no extraction!)
+            observations[i] = query_data['features']
+            labels[i] = 3 if query_data['label'] == 1 else 0
         
-        observations = np.array(observations)
-        labels = np.array(labels)
-        
-        # Train Tier 1
+        # Single batch training (much faster than per-sample)
         loss, acc = self.tier1_agent.train_step(observations, labels)
         
-        # Train Tier 2 (if enabled)
-        # In full version, this would use PPO
-        # For now, simplified supervised learning
-    
     def _update_metrics(self, episode_metrics):
         """Update running metrics"""
         for key, value in episode_metrics.items():

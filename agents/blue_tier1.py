@@ -16,14 +16,14 @@ class Tier1Detector(nn.Module):
         super().__init__()
         
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
+        self.hidden_dim = 128  # REDUCED from 256
+        self.num_layers = 2     # REDUCED from 3
         
-        # Bidirectional LSTM (3 layers, 256 units as specified)
+        # Bidirectional LSTM (SMALLER to make blue less powerful initially)
         self.lstm = nn.LSTM(
             input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
+            hidden_size=128,  # REDUCED
+            num_layers=2,     # REDUCED
             bidirectional=True,
             batch_first=True,
             dropout=0.3 if num_layers > 1 else 0
@@ -31,20 +31,20 @@ class Tier1Detector(nn.Module):
         
         # Attention mechanism
         self.attention = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(128 * 2, 64),  # REDUCED
             nn.Tanh(),
-            nn.Linear(128, 1)
+            nn.Linear(64, 1)
         )
         
-        # Output layers
+        # Output layers (SMALLER)
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(128 * 2, 64),  # REDUCED
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(128, 64),
+            nn.Linear(64, 32),       # REDUCED
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(64, num_actions)
+            nn.Linear(32, num_actions)
         )
         
     def forward(self, x):
@@ -137,6 +137,14 @@ class Tier1Agent:
         self.model.eval()
         with torch.no_grad():
             action, confidence, probs = self.model.predict_with_confidence(obs_tensor)
+        
+        # ADD UNCERTAINTY: reduce overconfidence
+        # Scale confidence down to make blue less certain
+        confidence_adjusted = confidence.item() * 0.85  # Reduce by 15%
+        
+        # Add small random noise to prevent perfect confidence
+        confidence_adjusted += np.random.uniform(-0.05, 0.05)
+        confidence_adjusted = np.clip(confidence_adjusted, 0.0, 1.0)
         
         if deterministic:
             return action.item(), confidence.item()

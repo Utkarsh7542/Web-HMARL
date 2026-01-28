@@ -167,6 +167,47 @@ class RedAgent:
             return 0.0
         return sum(self.attack_success_history) / len(self.attack_success_history)
     
+    def select_action_adaptive(self, state, blue_blocking_patterns, deterministic=False):
+        """
+        ADAPTIVE action selection that evolves based on blue's weaknesses
+        
+        Args:
+            state: (50,) defense patterns
+            blue_blocking_patterns: dict with recent blocking info
+            deterministic: If True, no exploration
+        
+        Returns:
+            action: int (0-19) - potentially mutated
+        """
+        # First get base action from Q-network
+        base_action = self.select_action(state, deterministic)
+        
+        # If blue is blocking this attack type consistently, mutate it
+        if len(self.attack_success_history) >= 20:
+            recent_successes = list(self.attack_success_history)[-20:]
+            recent_success_rate = sum(recent_successes) / len(recent_successes)
+            
+            # If success rate is very low, try different attack variants
+            if recent_success_rate < 0.1 and not deterministic:
+                # Explore different attack types more aggressively
+                if random.random() < 0.3:  # 30% chance to try random attack
+                    return random.randint(0, 19)
+        
+        return base_action
+
+    def adapt_to_blue_defense(self, blue_defense_strength):
+        """
+        Adjust exploration based on blue's performance
+        If blue is dominating, increase exploration
+        """
+        if blue_defense_strength > 0.9:  # Blue blocking >90%
+            # Increase exploration to find new bypasses
+            self.epsilon = min(0.5, self.epsilon * 1.1)
+            print(f"🔴 Red adapting: increased epsilon to {self.epsilon:.3f}")
+        elif blue_defense_strength < 0.5:  # Blue blocking <50%
+            # Blue is weak, can be more greedy
+            self.epsilon = max(self.epsilon_min, self.epsilon * 0.95)
+    
     def save(self, path):
         """Save model checkpoint"""
         try:
