@@ -1,3 +1,10 @@
+"""
+Blue Agent Tier 1: Detection Specialist - REBALANCED VERSION
+✅ Smaller model (1 layer, 64 hidden units - down from 2 layers, 128 units)
+✅ Added prediction uncertainty and noise
+✅ Reduced overconfidence (confidence scaled down 20%)
+✅ Better training stability with progressive difficulty
+"""
 
 import torch
 import torch.nn as nn
@@ -6,44 +13,48 @@ import os
 
 class Tier1Detector(nn.Module):
     """
-    Tier 1: Detection Specialist
-    Architecture: Bidirectional LSTM (3 layers, 256 hidden units) + Attention
+    Tier 1: Detection Specialist - REBALANCED
+    Architecture: Single Bidirectional LSTM (1 layer, 64 hidden units) + Attention
     Input: 127-dimensional feature vectors
     Output: 4 actions (Pass, Escalate, Suggest Block, Immediate Block)
+    
+    CHANGES:
+    - Reduced from 2 layers → 1 layer
+    - Reduced from 128 hidden → 64 hidden
+    - Smaller fully connected layers
+    - More dropout for regularization
     """
     
-    def __init__(self, input_dim=127, hidden_dim=256, num_layers=3, num_actions=4):
+    def __init__(self, input_dim=127, hidden_dim=64, num_layers=1, num_actions=4):
         super().__init__()
         
         self.input_dim = input_dim
-        self.hidden_dim = 128  # REDUCED from 256
-        self.num_layers = 2     # REDUCED from 3
+        self.hidden_dim = 64    # REDUCED from 128
+        self.num_layers = 1     # REDUCED from 2
         
-        # Bidirectional LSTM (SMALLER to make blue less powerful initially)
+        # Bidirectional LSTM (SMALLER)
         self.lstm = nn.LSTM(
             input_size=input_dim,
-            hidden_size=128,  # REDUCED
-            num_layers=2,     # REDUCED
+            hidden_size=64,      # REDUCED
+            num_layers=1,        # REDUCED
             bidirectional=True,
             batch_first=True,
-            dropout=0.3 if num_layers > 1 else 0
+            dropout=0.0          # Only 1 layer, so no inter-layer dropout
         )
         
-        # Attention mechanism
+        # Attention mechanism (SMALLER)
         self.attention = nn.Sequential(
-            nn.Linear(128 * 2, 64),  # REDUCED
+            nn.Linear(64 * 2, 32),   # REDUCED from 64
             nn.Tanh(),
-            nn.Linear(64, 1)
+            nn.Dropout(0.3),         # Added dropout
+            nn.Linear(32, 1)
         )
         
-        # Output layers (SMALLER)
+        # Output layers (MUCH SMALLER)
         self.fc = nn.Sequential(
-            nn.Linear(128 * 2, 64),  # REDUCED
+            nn.Linear(64 * 2, 32),   # REDUCED from 64
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 32),       # REDUCED
-            nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.4),         # Increased dropout
             nn.Linear(32, num_actions)
         )
         
@@ -86,20 +97,26 @@ class Tier1Detector(nn.Module):
 
 class Tier1Agent:
     """
-    Tier 1 Agent Wrapper
+    Tier 1 Agent Wrapper - REBALANCED
     Handles training, action selection, and threshold management
+    
+    CHANGES:
+    - Reduced confidence scaling (now 20% reduction instead of 15%)
+    - Added prediction noise
+    - Slower learning rate
+    - More conservative thresholds
     """
     
-    def __init__(self, learning_rate=3e-4, device=None):
+    def __init__(self, learning_rate=2e-4, device=None):  # REDUCED from 3e-4
         # Device
         self.device = device if device else torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
         
-        # Model
+        # Model (SMALLER)
         self.model = Tier1Detector().to(self.device)
         
-        # Optimizer
+        # Optimizer (SLOWER learning)
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), 
             lr=learning_rate
@@ -108,21 +125,25 @@ class Tier1Agent:
         # Loss
         self.criterion = nn.CrossEntropyLoss()
         
-        # Thresholds (Section 6.3)
+        # Thresholds (MORE CONSERVATIVE)
         self.thresholds = {
-            'pass': 0.3,       # Score < 0.3: Pass directly
-            'escalate': 0.6,   # 0.3-0.6: Escalate to Tier 2
-            'suggest': 0.9,    # 0.6-0.9: Suggest block
-            'block': 0.9       # > 0.9: Immediate block
+            'pass': 0.35,       # Raised from 0.3 (less likely to pass)
+            'escalate': 0.65,   # Raised from 0.6 (more escalation)
+            'suggest': 0.92,    # Raised from 0.9 (harder to suggest block)
+            'block': 0.92       # Raised from 0.9 (harder to block)
         }
         
         # Training metrics
         self.train_losses = []
         self.train_accuracies = []
         
+        # Uncertainty parameters
+        self.confidence_scale = 0.80    # Reduce confidence by 20%
+        self.prediction_noise = 0.08    # Add noise to predictions
+        
     def select_action(self, observation, deterministic=False):
         """
-        Select action based on observation
+        Select action based on observation with UNCERTAINTY
         
         Args:
             observation: (127,) numpy array
@@ -138,20 +159,26 @@ class Tier1Agent:
         with torch.no_grad():
             action, confidence, probs = self.model.predict_with_confidence(obs_tensor)
         
-        # ADD UNCERTAINTY: reduce overconfidence
-        # Scale confidence down to make blue less certain
-        confidence_adjusted = confidence.item() * 0.85  # Reduce by 15%
+        # ADD UNCERTAINTY: Reduce overconfidence
+        confidence_adjusted = confidence.item() * self.confidence_scale
         
-        # Add small random noise to prevent perfect confidence
-        confidence_adjusted += np.random.uniform(-0.05, 0.05)
+        # Add random noise to prevent perfect confidence
+        noise = np.random.uniform(-self.prediction_noise, self.prediction_noise)
+        confidence_adjusted += noise
         confidence_adjusted = np.clip(confidence_adjusted, 0.0, 1.0)
         
         if deterministic:
-            return action.item(), confidence.item()
+            return action.item(), confidence_adjusted
         else:
-            # Sample from distribution (for exploration)
-            action_sampled = torch.multinomial(probs, 1).item()
-            return action_sampled, probs[0, action_sampled].item()
+            # Sample from distribution with added noise for exploration
+            probs_np = probs[0].cpu().numpy()
+            
+            # Add small noise to probabilities
+            probs_np += np.random.dirichlet([0.3] * len(probs_np)) * 0.1
+            probs_np = probs_np / probs_np.sum()  # Re-normalize
+            
+            action_sampled = np.random.choice(len(probs_np), p=probs_np)
+            return action_sampled, probs_np[action_sampled]
     
     def select_action_with_thresholds(self, observation):
         """
@@ -165,11 +192,10 @@ class Tier1Agent:
             logits = self.model(obs_tensor)
             probs = torch.softmax(logits, dim=-1)
             
-            # Get malicious probability (assuming action 3 = block for malicious)
-            # In practice, you'd train this to output threat score
-            threat_score = probs[0, 3].item()  # Probability of "immediate block"
+            # Get malicious probability
+            threat_score = probs[0, 3].item()
         
-        # Apply thresholds
+        # Apply MORE CONSERVATIVE thresholds
         if threat_score < self.thresholds['pass']:
             action = 0  # Pass
         elif threat_score < self.thresholds['escalate']:
@@ -183,7 +209,7 @@ class Tier1Agent:
     
     def train_step(self, observations, actions, rewards=None):
         """
-        Single training step (supervised learning initially)
+        Single training step (supervised learning)
         
         Args:
             observations: (batch, 127)
@@ -203,7 +229,10 @@ class Tier1Agent:
         # Backward pass
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
+        # Gradient clipping (prevent too fast learning)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+        
         self.optimizer.step()
         
         # Metrics
@@ -216,10 +245,31 @@ class Tier1Agent:
         
         return loss.item(), accuracy
     
+    def add_training_noise(self, enable=True, noise_level=0.1):
+        """
+        Add noise during training to prevent overfitting
+        
+        Args:
+            enable: Whether to add noise
+            noise_level: How much noise (0.0-1.0)
+        """
+        if enable:
+            self.prediction_noise = noise_level
+        else:
+            self.prediction_noise = 0.0
+    
+    def adjust_confidence_scaling(self, scale):
+        """
+        Adjust how much we scale down confidence
+        
+        Args:
+            scale: float, multiply confidence by this (0.0-1.0)
+        """
+        self.confidence_scale = np.clip(scale, 0.0, 1.0)
+    
     def save(self, path):
         """Save model checkpoint"""
         try:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(path), exist_ok=True)
             
             torch.save({
@@ -227,11 +277,13 @@ class Tier1Agent:
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'thresholds': self.thresholds,
                 'train_losses': self.train_losses,
-                'train_accuracies': self.train_accuracies
+                'train_accuracies': self.train_accuracies,
+                'confidence_scale': self.confidence_scale,
+                'prediction_noise': self.prediction_noise,
             }, path)
             
             if os.path.exists(path):
-                file_size = os.path.getsize(path) / 1024  # KB
+                file_size = os.path.getsize(path) / 1024
                 print(f"[OK] Tier 1 model saved to {path} ({file_size:.1f} KB)")
             else:
                 print(f"[WARN] Model file may not have been created at {path}")
@@ -244,32 +296,65 @@ class Tier1Agent:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.thresholds = checkpoint['thresholds']
+        
+        if 'confidence_scale' in checkpoint:
+            self.confidence_scale = checkpoint['confidence_scale']
+        if 'prediction_noise' in checkpoint:
+            self.prediction_noise = checkpoint['prediction_noise']
+        
         print(f"Tier 1 model loaded from {path}")
 
 
 # Test
 if __name__ == "__main__":
-    print("Testing Tier 1 Detector...")
+    print("Testing Tier 1 Detector (Rebalanced)...")
     
     # Create agent
     agent = Tier1Agent()
     print(f"Using device: {agent.device}")
+    print(f"Confidence scaling: {agent.confidence_scale}")
+    print(f"Prediction noise: {agent.prediction_noise}")
+    
+    # Model size comparison
+    total_params = sum(p.numel() for p in agent.model.parameters())
+    print(f"Total parameters: {total_params:,} (much smaller than before)")
     
     # Test forward pass
     batch_size = 16
     test_obs = np.random.randn(batch_size, 127).astype(np.float32)
     
-    # Test action selection
-    action, confidence = agent.select_action(test_obs[0])
-    print(f"Selected action: {action}, Confidence: {confidence:.3f}")
+    # Test action selection with uncertainty
+    print("\nTesting action selection (10 samples from same input):")
+    single_obs = test_obs[0]
+    actions = []
+    confidences = []
+    
+    for _ in range(10):
+        action, confidence = agent.select_action(single_obs, deterministic=False)
+        actions.append(action)
+        confidences.append(confidence)
+    
+    print(f"Actions: {actions}")
+    print(f"Confidences: {[f'{c:.3f}' for c in confidences]}")
+    print(f"Variation in actions: {len(set(actions))} different actions")
+    print(f"Confidence range: [{min(confidences):.3f}, {max(confidences):.3f}]")
     
     # Test training step
     test_actions = np.random.randint(0, 4, size=batch_size)
     loss, acc = agent.train_step(test_obs, test_actions)
-    print(f"Training - Loss: {loss:.4f}, Accuracy: {acc:.3f}")
+    print(f"\nTraining - Loss: {loss:.4f}, Accuracy: {acc:.3f}")
     
     # Test threshold-based selection
     action_thresh, score = agent.select_action_with_thresholds(test_obs[0])
-    print(f"Threshold-based action: {action_thresh}, Threat score: {score:.3f}")
+    print(f"\nThreshold-based action: {action_thresh}, Threat score: {score:.3f}")
     
-    print("\n[OK] Tier 1 test complete!")
+    # Test confidence adjustment
+    print(f"\nTesting confidence adjustment:")
+    print(f"Original confidence scale: {agent.confidence_scale}")
+    agent.adjust_confidence_scaling(0.6)
+    print(f"New confidence scale: {agent.confidence_scale}")
+    
+    action, conf = agent.select_action(single_obs, deterministic=True)
+    print(f"Action with 60% confidence: {action}, Confidence: {conf:.3f}")
+    
+    print("\n✅ Tier 1 rebalanced test complete!")

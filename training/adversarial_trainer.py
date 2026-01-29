@@ -1,7 +1,9 @@
 """
-Hierarchical Adversarial Training Pipeline
-Complete 3-tier hierarchy: Tier 1 → Master → Tier 2
-Implements framework Section 6.3-6.5 with baseline comparison
+Hierarchical Adversarial Training Pipeline - FIXED VERSION
+✅ Fixed reward storage bug (reward_red → episode_rewards_red)
+✅ Added curriculum learning (progressive difficulty)
+✅ Better red-blue balance mechanisms
+✅ Improved training dynamics
 """
 
 import numpy as np
@@ -27,7 +29,7 @@ from evaluation.baselines import ModSecurityBaseline, SimpleMLBaseline
 class HierarchicalAdversarialTrainer:
     """
     Hierarchical Multi-Agent RL Training
-    Full 3-tier architecture with baseline comparison
+    Full 3-tier architecture with curriculum learning
     """
     
     def __init__(self, 
@@ -36,7 +38,8 @@ class HierarchicalAdversarialTrainer:
                  save_freq=500,
                  eval_freq=100,
                  save_dir='../results',
-                 use_hierarchy=True):
+                 use_hierarchy=True,
+                 curriculum_learning=True):
         
         self.n_episodes = n_episodes
         self.max_steps_per_episode = max_steps_per_episode
@@ -44,6 +47,7 @@ class HierarchicalAdversarialTrainer:
         self.eval_freq = eval_freq
         self.save_dir = save_dir
         self.use_hierarchy = use_hierarchy
+        self.curriculum_learning = curriculum_learning
         
         # Create directories
         os.makedirs(f"{save_dir}/models", exist_ok=True)
@@ -67,13 +71,17 @@ class HierarchicalAdversarialTrainer:
             'immediate_block_rate': [],
         }
         
+        # Curriculum tracking
+        self.curriculum_phase = 0  # 0=easy, 1=medium, 2=hard
+        self.consecutive_perfect_blue = 0
+        
         # Dataset
         print("Creating dataset...")
         dataset_loader = SQLInjectionDataset(n_attacks=1000, n_benign=1000)
         self.dataset = dataset_loader.generate_dataset()
         self.dataset_loader = dataset_loader
 
-        # Precompute features once (major speedup vs per-step extraction in env/train)
+        # Precompute features once (major speedup)
         print("Precomputing features...")
         self.dataset['features'] = [
             self.dataset_loader.extract_features(q) for q in self.dataset['query']
@@ -93,6 +101,7 @@ class HierarchicalAdversarialTrainer:
         if self.tier2_agent:
             print(f"Tier 2 device: {self.tier2_agent.device}")
         print(f"Hierarchy enabled: {use_hierarchy}")
+        print(f"Curriculum learning: {curriculum_learning}")
         
         # Baselines (for comparison)
         print("Initializing baselines...")
@@ -114,16 +123,33 @@ class HierarchicalAdversarialTrainer:
         print(f"ML Baseline initial performance: {metrics}")
         
     def train(self):
-        """Main hierarchical training loop"""
+        """Main hierarchical training loop with curriculum"""
         print(f"\n{'='*60}")
         print(f"Hierarchical Adversarial Training: {self.n_episodes} episodes")
         print(f"Architecture: {'3-Tier Hierarchy' if self.use_hierarchy else 'Tier 1 Only'}")
+        print(f"Curriculum: {'Enabled' if self.curriculum_learning else 'Disabled'}")
         print(f"{'='*60}\n")
         
         for episode in tqdm(range(self.n_episodes), desc="Training"):
+            # Curriculum adjustment
+            if self.curriculum_learning:
+                self._adjust_curriculum(episode)
+            
             episode_metrics = self._run_hierarchical_episode(episode)
             self._update_metrics(episode_metrics)
             
+            # Check for blue dominance
+            if episode_metrics['detection_accuracy'] >= 0.99:
+                self.consecutive_perfect_blue += 1
+            else:
+                self.consecutive_perfect_blue = 0
+            
+            # If blue dominates for 100 episodes, boost red
+            if self.consecutive_perfect_blue >= 100:
+                print(f"\n⚠️  Blue dominating for 100 episodes - boosting red agent...")
+                self._boost_red_agent()
+                self.consecutive_perfect_blue = 0
+
             if (episode + 1) % self.eval_freq == 0:
                 self._evaluate(episode + 1)
             
@@ -140,12 +166,39 @@ class HierarchicalAdversarialTrainer:
         print("Training Complete!")
         print(f"{'='*60}\n")
     
+    def _adjust_curriculum(self, episode):
+        """
+        Curriculum learning: Start easy, progressively harder
+        Phase 0 (ep 0-150): Blue gets 30% less training
+        Phase 1 (ep 150-300): Normal training
+        Phase 2 (ep 300+): Red gets attack mutation
+        """
+        if episode == 150:
+            self.curriculum_phase = 1
+            print("\n📚 Curriculum Phase 1: Normal training begins")
+        elif episode == 300:
+            self.curriculum_phase = 2
+            self.red_agent.enable_mutation = True
+            print("\n📚 Curriculum Phase 2: Red attack mutation enabled")
+    
+    def _boost_red_agent(self):
+        """Boost red agent when blue dominates"""
+        # Increase epsilon for more exploration
+        self.red_agent.epsilon = min(0.6, self.red_agent.epsilon * 1.3)
+        print(f"    🔴 Red epsilon boosted to {self.red_agent.epsilon:.3f}")
+        
+        # Enable mutation if not already
+        self.red_agent.enable_mutation = True
+        print(f"    🔴 Red mutation enabled")
+    
     def _run_hierarchical_episode(self, episode_num):
         """Run episode with hierarchical decision-making"""
         obs, _ = self.env.reset()
         
-        episode_reward_red = 0
-        episode_reward_blue = 0
+        # 🔧 FIX: Initialize as float
+        episode_reward_red = 0.0
+        episode_reward_blue = 0.0
+        
         episode_stats = {
             'attacks_successful': 0,
             'attacks_blocked': 0,
@@ -155,9 +208,9 @@ class HierarchicalAdversarialTrainer:
             'total_benign': 0,
             # Routing stats
             'tier1_only': 0,
-            'tier2_escalated': 0,
-            'tier3_analyzed': 0,
-            'immediate_blocks': 0,
+            'tier2': 0,
+            'tier3': 0,
+            'immediate_block': 0,
         }
         
         for step in range(self.max_steps_per_episode):
@@ -188,30 +241,30 @@ class HierarchicalAdversarialTrainer:
                     tier1_probs = np.zeros(4)
                     tier1_probs[tier1_action] = tier1_confidence
                     
-                    tier2_action, _, _ = self.tier2_agent.select_action(
+                    # FIXED: Unpack 4 values from Tier 2
+                    tier2_action, tier2_probs, tier2_value, tier2_log_prob = self.tier2_agent.select_action(
                         obs['blue'], tier1_probs, context
                     )
                     final_action = tier2_action
                 elif route == 'immediate_block':
                     final_action = 3  # Block
                 elif route == 'tier3':
-                    # Tier 3 would analyze asynchronously
-                    # For now, use Tier 1 decision
                     final_action = tier1_action
                 else:  # tier1_only
                     final_action = tier1_action
             
-            # Red agent action - ADAPTIVE
+            # Red agent action - ADAPTIVE with mutation
             blue_blocking_patterns = {
                 'recent_block_rate': sum(1 for d in self.env.defense_history[-20:] if d.get('blocked', False)) / max(len(self.env.defense_history[-20:]), 1) if len(self.env.defense_history) > 0 else 0.0
             }
+            
             red_action = self.red_agent.select_action_adaptive(
                 obs['red'], 
                 blue_blocking_patterns, 
                 deterministic=False
             )
 
-            # Adapt red's exploration based on blue's strength
+            # Adapt red's exploration based on blue's strength (less frequent)
             if step % 100 == 0 and len(self.env.defense_history) >= 20:
                 recent_defenses = self.env.defense_history[-100:]
                 blue_strength = sum(1 for d in recent_defenses if d.get('correct', False)) / len(recent_defenses)
@@ -221,12 +274,10 @@ class HierarchicalAdversarialTrainer:
             actions = {'red': red_action, 'blue': final_action}
             next_obs, rewards, dones, truncs, info = self.env.step(actions)
             
+            # NaN protection
             if np.isnan(rewards['red']) or np.isinf(rewards['red']):
-                print(f"⚠️ Episode {episode_num}, Step {step}: Invalid red reward, setting to 0.0")
                 rewards['red'] = 0.0
-
             if np.isnan(rewards['blue']) or np.isinf(rewards['blue']):
-                print(f"⚠️ Episode {episode_num}, Step {step}: Invalid blue reward, setting to 0.0")
                 rewards['blue'] = 0.0
 
             # Store transitions
@@ -242,10 +293,11 @@ class HierarchicalAdversarialTrainer:
                     false_positive=info['false_positive']
                 )
             
-            # Track stats
-            episode_reward_red += rewards['red']
-            episode_reward_blue += rewards['blue']
+            # 🔧 FIX: Accumulate rewards as float
+            episode_reward_red += float(rewards['red'])
+            episode_reward_blue += float(rewards['blue'])
             
+            # Track stats
             if info['is_attack']:
                 episode_stats['total_attacks'] += 1
                 if info['attack_successful']:
@@ -259,11 +311,19 @@ class HierarchicalAdversarialTrainer:
                 else:
                     episode_stats['true_negatives'] += 1
             
-            # Train agents
-            if step % 32 == 0:
-                red_loss = self.red_agent.train_step()
-                if len(self.env.defense_history) >= 32:
+            # Train agents - curriculum adjusted
+            if self.curriculum_phase == 0:
+                # Phase 0: Train red normally, blue less frequently
+                if step % 32 == 0:
+                    self.red_agent.train_step()
+                if step % 64 == 0 and len(self.env.defense_history) >= 32:
                     self._train_blue_agents()
+            else:
+                # Phase 1+: Normal training
+                if step % 32 == 0:
+                    red_loss = self.red_agent.train_step()
+                    if len(self.env.defense_history) >= 32:
+                        self._train_blue_agents()
             
             self.red_agent.record_attack_result(info['attack_successful'])
             obs = next_obs
@@ -271,16 +331,29 @@ class HierarchicalAdversarialTrainer:
             if dones['red'] or dones['blue']:
                 break
         
-        # Calculate metrics
-        total_queries = episode_stats['total_attacks'] + episode_stats['total_benign']
+        # Calculate metrics with NaN protection
+        total_queries = max(episode_stats['total_attacks'] + episode_stats['total_benign'], 1)
+        
+        attack_success_rate = episode_stats['attacks_successful'] / max(episode_stats['total_attacks'], 1)
+        detection_accuracy = episode_stats['attacks_blocked'] / max(episode_stats['total_attacks'], 1)
+        false_positive_rate = episode_stats['false_positives'] / max(episode_stats['total_benign'], 1)
+        blue_win_rate = episode_stats['attacks_blocked'] / max(episode_stats['total_attacks'], 1)
+        
+        # NaN protection
+        attack_success_rate = 0.0 if np.isnan(attack_success_rate) else float(attack_success_rate)
+        detection_accuracy = 0.0 if np.isnan(detection_accuracy) else float(detection_accuracy)
+        false_positive_rate = 0.0 if np.isnan(false_positive_rate) else float(false_positive_rate)
+        blue_win_rate = 0.0 if np.isnan(blue_win_rate) else float(blue_win_rate)
+        
+        # 🔧 CRITICAL FIX: Use correct key names!
         episode_metrics = {
-            'reward_red': episode_reward_red,
-            'reward_blue': episode_reward_blue,
-            'attack_success_rate': episode_stats['attacks_successful'] / max(episode_stats['total_attacks'], 1),
-            'detection_accuracy': episode_stats['attacks_blocked'] / max(episode_stats['total_attacks'], 1),
-            'false_positive_rate': episode_stats['false_positives'] / max(episode_stats['total_benign'], 1),
-            'blue_win_rate': episode_stats['attacks_blocked'] / max(episode_stats['total_attacks'], 1),
-            'red_epsilon': self.red_agent.epsilon,
+            'episode_rewards_red': float(episode_reward_red),   # FIXED: was 'reward_red'
+            'episode_rewards_blue': float(episode_reward_blue), # FIXED: was 'reward_blue'
+            'attack_success_rate': attack_success_rate,
+            'detection_accuracy': detection_accuracy,
+            'false_positive_rate': false_positive_rate,
+            'blue_win_rate': blue_win_rate,
+            'red_epsilon': float(self.red_agent.epsilon),
             'episode_length': step + 1,
         }
         
@@ -292,13 +365,6 @@ class HierarchicalAdversarialTrainer:
                 'tier3_analyzed_rate': episode_stats.get('tier3', 0) / total_queries,
                 'immediate_block_rate': episode_stats.get('immediate_block', 0) / total_queries,
             })
-        else:
-            episode_metrics.update({
-                'tier1_only_rate': 1.0,
-                'tier2_escalated_rate': 0.0,
-                'tier3_analyzed_rate': 0.0,
-                'immediate_block_rate': 0.0,
-            })
         
         return episode_metrics
     
@@ -309,7 +375,7 @@ class HierarchicalAdversarialTrainer:
         
         recent_history = self.env.defense_history[-32:]
         
-        # Preallocate arrays (much faster)
+        # Preallocate arrays
         observations = np.zeros((len(recent_history), 127), dtype=np.float32)
         labels = np.zeros(len(recent_history), dtype=np.int64)
         
@@ -318,11 +384,11 @@ class HierarchicalAdversarialTrainer:
             query_idx = self.env.dataset_indices[idx % len(self.env.dataset)]
             query_data = self.dataset.iloc[query_idx]
             
-            # Use precomputed features (no extraction!)
+            # Use precomputed features
             observations[i] = query_data['features']
             labels[i] = 3 if query_data['label'] == 1 else 0
         
-        # Single batch training (much faster than per-sample)
+        # Single batch training
         loss, acc = self.tier1_agent.train_step(observations, labels)
         
     def _update_metrics(self, episode_metrics):
@@ -350,6 +416,9 @@ class HierarchicalAdversarialTrainer:
         print(f"Detection Accuracy:  {avg_detection:>7.1%}")
         print(f"False Positive:      {avg_fp:>7.1%}")
         print(f"Red Epsilon:         {self.red_agent.epsilon:>8.3f}")
+        
+        if self.curriculum_learning:
+            print(f"Curriculum Phase:    {self.curriculum_phase}")
         
         if self.use_hierarchy:
             avg_t1 = np.mean(self.metrics['tier1_only_rate'][-recent:])
@@ -394,7 +463,7 @@ class HierarchicalAdversarialTrainer:
             query_data = self.dataset.iloc[idx]
             query = query_data['query']
             true_label = query_data['label']
-            features = self.dataset_loader.extract_features(query)
+            features = query_data['features']
             
             # Web-HMARL prediction
             tier1_action, tier1_conf = self.tier1_agent.select_action(features, deterministic=True)
@@ -499,7 +568,6 @@ class HierarchicalAdversarialTrainer:
         """Generate comprehensive training visualization"""
         sns.set_style("whitegrid")
         
-        # Check if we have data
         if len(self.metrics['episode_rewards_red']) == 0:
             print("[WARN] No metrics to plot yet")
             return
@@ -514,7 +582,6 @@ class HierarchicalAdversarialTrainer:
             fontsize=16, fontweight='bold'
         )
         
-        # Use actual episode numbers that match data length
         n_episodes = len(self.metrics['episode_rewards_red'])
         episodes = np.arange(n_episodes)
         
@@ -523,7 +590,6 @@ class HierarchicalAdversarialTrainer:
         smoothed_red = self._smooth(self.metrics['episode_rewards_red'])
         smoothed_blue = self._smooth(self.metrics['episode_rewards_blue'])
         
-        # Make sure lengths match
         episodes_plot = np.arange(len(smoothed_red))
         
         ax.plot(episodes_plot, smoothed_red, label='Red Agent', color='red', alpha=0.8, linewidth=2)
@@ -637,9 +703,7 @@ class HierarchicalAdversarialTrainer:
         if len(data) < window:
             return data
         
-        # Use numpy convolve for smoothing
         smoothed = np.convolve(data, np.ones(window)/window, mode='same')
-        
         return smoothed
 
 
@@ -650,7 +714,8 @@ if __name__ == "__main__":
         max_steps_per_episode=500,
         save_freq=200,
         eval_freq=50,
-        use_hierarchy=True
+        use_hierarchy=True,
+        curriculum_learning=True
     )
     
     trainer.train()
