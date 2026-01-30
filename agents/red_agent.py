@@ -167,32 +167,38 @@ class RedAgent:
     
     def adapt_to_blue_defense(self, blue_defense_strength):
         """
-        Adjust exploration based on blue's performance
-        
-        Args:
-            blue_defense_strength: float [0-1], blue's success rate
+        AGGRESSIVE adaptation - ensures epsilon varies widely
         """
-        # If blue is dominating (>90% success), increase exploration
-        if blue_defense_strength > 0.90:
-            # Check if we need to boost (not done recently)
-            if self.steps - self.last_epsilon_boost > 100:
-                self.epsilon = min(self.epsilon_max, self.epsilon * 1.05)
+        # Very strong blue (>85%): Need significant exploration
+        if blue_defense_strength > 0.85:
+            if self.steps - self.last_epsilon_boost > 80:  # More frequent
+                self.epsilon = min(self.epsilon_max, self.epsilon * 1.20)  # Larger boost
                 self.last_epsilon_boost = self.steps
                 self.consecutive_failures += 1
                 
-                # Enable mutation if struggling badly
-                if self.consecutive_failures >= 10:
+                if self.consecutive_failures >= 8:  # Faster mutation trigger
                     self.enable_mutation = True
         
-        # If blue is weak (<70%), reduce exploration (exploit weaknesses)
-        elif blue_defense_strength < 0.70:
-            self.epsilon = max(self.epsilon_min, self.epsilon * 0.98)
-            self.consecutive_failures = 0  # Reset failure counter
+        # Strong blue (75-85%): Moderate exploration
+        elif blue_defense_strength > 0.75:
+            if self.steps - self.last_epsilon_boost > 120:
+                self.epsilon = min(self.epsilon_max, self.epsilon * 1.10)  # Bigger boost
+                self.last_epsilon_boost = self.steps
         
-        # Normal range (70-90%): standard epsilon decay
+        # Moderate blue (65-75%): Maintain current strategy
+        elif blue_defense_strength > 0.65:
+            # Just add noise, don't decay
+            pass
+        
+        # Weak blue (<65%): Exploit more
         else:
-            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-            self.consecutive_failures = max(0, self.consecutive_failures - 1)
+            self.epsilon = max(self.epsilon_min, self.epsilon * 0.95)  # Faster reduction
+            self.consecutive_failures = 0
+    
+        # Larger random perturbation
+        import numpy as np
+        noise = np.random.uniform(-0.02, 0.02)
+        self.epsilon = np.clip(self.epsilon + noise, self.epsilon_min, self.epsilon_max)
     
     def store_transition(self, state, action, reward, next_state, done):
         """Store experience in replay buffer"""
